@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "lldb",
+      "request": "launch",
+      "args": [],
+      "cwd": "/Users/yoons/jisoo/lululalla/html/bring_honey",
+      "program": "/Users/yoons/jisoo/lululalla/html/bring_honey/build/Debug/outDebug"
+    }
+  ]
+}
