@@ -1,1 +1,1 @@
-print("Hello, Jisoo!")
+print("I will love Jisoo forever")
