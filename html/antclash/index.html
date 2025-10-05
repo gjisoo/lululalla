@@ -28,6 +28,13 @@
     color:#fff;
     font-weight:700;
     cursor:grab; /* 드래그 가능 표시 */
+    background-size: 30px 30px;
+    background-repeat: no-repeat;
+    background-position: center top;
+    padding-top: 40px;
+  }
+  .btn[data-card="tank"] {
+    background-image: url('image/ant1.png');
   }
   .btn:active {transform:scale(0.98)}
   .hpbar{height:8px;background:#333;border-radius:8px;overflow:hidden}
@@ -70,7 +77,6 @@
   const paths = [
     [{x: 0, y: 200}, {x: 100, y: 250}, {x: 180, y: 320}, {x: 240, y: 380}],
     [{x: 540, y: 300}, {x: 400, y: 340}, {x: 300, y: 360}, {x: 240, y: 380}],
-    [{x: 270, y: 0}, {x: 260, y: 150}, {x: 250, y: 280}, {x: 240, y: 380}],
     [{x: 270, y: 960}, {x: 260, y: 800}, {x: 250, y: 600}, {x: 240, y: 380}]
   ];
 
@@ -83,13 +89,42 @@
   const background = new Image();
   background.src = 'image/일본왕개미집.png';
 
+  // --- 개미 이미지 ---
+  const antImages = {
+    tank: new Image(),
+    swarm: new Image(),
+    ranged: new Image()
+  };
+  antImages.tank.src = 'image/ant1.png';
+
+  // --- 렌더링 크기(픽셀) ---
+  // drawUnit에서 사용하는 이미지/도형 크기와 동기화하세요.
+  const renderSize = {
+    tank: 140,
+    swarm: 100,
+    ranged: 120
+  };
+
   // --- RESIZE ---
   function fit() {
     const w = window.innerWidth, h = window.innerHeight;
     const scale = Math.min(w/world.w, h/world.h);
-    canvas.width = Math.floor(world.w*scale);
-    canvas.height = Math.floor(world.h*scale);
-    ctx.setTransform(scale,0,0,scale,0,0);
+    const dpr = window.devicePixelRatio || 1;
+
+    // CSS 크기 (화면에 보이는 크기)
+    canvas.style.width = Math.floor(world.w * scale) + 'px';
+    canvas.style.height = Math.floor(world.h * scale) + 'px';
+
+    // 내부 비트맵 크기(디바이스 픽셀 비율 적용)
+    canvas.width = Math.floor(world.w * scale * dpr);
+    canvas.height = Math.floor(world.h * scale * dpr);
+
+    // transform으로 논리 좌표계 설정 (world 크기 기준)
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+
+    // 이미지 스무딩 설정 — 고해상도에서 품질 우선
+    ctx.imageSmoothingEnabled = true;
+    try { ctx.imageSmoothingQuality = 'high'; } catch(e) {}
   }
   window.addEventListener('resize', fit, {passive:true});
   fit();
@@ -112,7 +147,9 @@
       y: startPoint.y, 
       dir, 
       hp: 1, 
-      cd: 0 
+      cd: 0,
+      hitEffect: 0, // 부딪히는 이펙트 시간
+      facing: dir // 초깃값으로 바라보는 방향 저장
     };
     if (kind==='tank') arr.push({...common, hp: 50});
     else if (kind==='swarm') {
@@ -211,7 +248,33 @@
       u.cd -= dt;
       if (u.cd<=0) {
         u.cd = melee? 0.5 : 0.9;
-        target.hp -= dmg[u.kind];
+        // 이미지 끝과 끝이 닿으면 충돌 판정
+        const myRadius = (renderSize[u.kind] || 100) * 0.5; // 이미지 반지름
+        const theirRadius = (renderSize[target.kind] || 100) * 0.5;
+        const centerDist = Math.hypot(target.x - u.x, target.y - u.y);
+        const touchDist = myRadius + theirRadius; // 이미지 끝과 끝이 닿는 거리
+        
+        if (centerDist <= touchDist) {
+          target.hp -= dmg[u.kind];
+          // 부딪힘 이펙트 (흔들림)
+          u.hitEffect = 0.3; // 0.3초
+          target.hitEffect = 0.3;
+          
+          // 서로 밀어내는 효과 (팅기는 효과)
+          const pushForce = 15; // 밀어내는 힘
+          const dx = target.x - u.x;
+          const dy = target.y - u.y;
+          const pushDist = Math.hypot(dx, dy);
+          if (pushDist > 0) {
+            const pushX = (dx / pushDist) * pushForce;
+            const pushY = (dy / pushDist) * pushForce;
+            // 공격자는 뒤로, 피격자는 앞으로 밀려남
+            u.x -= pushX * 0.3;
+            u.y -= pushY * 0.3;
+            target.x += pushX * 0.7;
+            target.y += pushY * 0.7;
+          }
+        }
       }
       if (melee) return;
     } else {
@@ -220,6 +283,9 @@
         const dx = nextPoint.x - u.x;
         const dy = nextPoint.y - u.y;
         const dist = Math.hypot(dx, dy);
+        
+        // 이동 방향에 따른 facing 업데이트
+        if (Math.abs(dx) > 0.5) u.facing = dx < 0 ? -1 : 1;
         
         if (dist < 10) {
           u.pathIndex++;
@@ -274,13 +340,41 @@
     ctx.beginPath(); ctx.arc(base.my.x, base.my.y, 28, 0, Math.PI*2); ctx.fill();
 
     function drawUnit(u){
+      // 이미지와 HP 바를 분리해 그려서, 이미지만 좌우 반전되도록 함
+      // 이미지 그리기
       ctx.save();
       ctx.translate(u.x, u.y);
-      ctx.fillStyle = (u.side==='me')? '#60a5fa' : '#f87171';
-      const r = u.kind==='tank'? 11 : (u.kind==='ranged'?9:7);
-      ctx.beginPath(); ctx.ellipse(0,0,r, r*0.7, 0, 0, Math.PI*2); ctx.fill();
-      ctx.beginPath(); ctx.arc(r*0.9,0,r*0.4,0,Math.PI*2); ctx.fill();
-      ctx.beginPath(); ctx.arc(-r*0.9,0,r*0.5,0,Math.PI*2); ctx.fill();
+
+      // 부딪히는 이펙트 (흔들림)
+      if (u.hitEffect && u.hitEffect > 0) {
+        const shake = Math.sin(u.hitEffect * 40) * 3;
+        ctx.translate(shake, 0);
+        u.hitEffect -= dt;
+      }
+
+      // 이동 방향 결정 (u.facing은 stepUnit에서 업데이트 됨)
+      const facing = (typeof u.facing !== 'undefined') ? u.facing : (u.dir || 1);
+
+      // 개미 이미지가 있으면 이미지 사용, 없으면 기본 도형
+      if (antImages[u.kind] && antImages[u.kind].complete) {
+        // 크기 조금 줄임
+        const size = u.kind==='tank'? 140 : (u.kind==='ranged'?120:100);
+        if (facing === 1) ctx.scale(-1, 1); // 반전 조건 (현재 설정)
+        ctx.drawImage(antImages[u.kind], -size/2, -size/2, size, size);
+      } else {
+        // 기본 도형
+        ctx.fillStyle = (u.side==='me')? '#60a5fa' : '#f87171';
+        const r = u.kind==='tank'? 45 : (u.kind==='ranged'?38:30);
+        ctx.beginPath(); ctx.ellipse(0,0,r, r*0.7, 0, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(r*0.9,0,r*0.4,0,Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(-r*0.9,0,r*0.5,0,Math.PI*2); ctx.fill();
+      }
+
+      ctx.restore();
+
+      // HP 바는 이미지 반전 영향을 받지 않게 별도로 그림
+      ctx.save();
+      ctx.translate(u.x, u.y);
       const hpw = Math.max(0, Math.min(1, u.hp/(u.kind==='tank'?50:(u.kind==='ranged'?20:8))))*18;
       ctx.fillStyle = '#10b981'; ctx.fillRect(-9,-14,hpw,3);
       ctx.restore();
@@ -296,10 +390,8 @@
     requestAnimationFrame(loop);
   }
 
-  // 배경 이미지 로드 후 게임 시작
-  background.onload = () => {
-    requestAnimationFrame(loop);
-  };
+  // 게임 시작
+  requestAnimationFrame(loop);
 })();
 </script>
 </body>
