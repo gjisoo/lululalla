@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>개미 클래시 – MVP</title>
+<style>
+  html,body {margin:0;padding:0;background:#0e0f12;color:#eee;font-family:system-ui,apple sd gothic neo,malgun gothic,sans-serif;}
+  #wrap {position:fixed;inset:0;display:flex;flex-direction:column;}
+  #topbar {display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px 12px;}
+  #pher {font-weight:700}
+  #game {flex:1;touch-action:none}
+  #controls {display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:8px}
+  .btn {padding:10px 8px;border-radius:10px;border:none;background:#21242c;color:#fff;font-weight:700}
+  .btn:active {transform:scale(0.98)}
+  .hpbar{height:8px;background:#333;border-radius:8px;overflow:hidden}
+  .hp{height:100%;background:#34d399}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="topbar">
+    <div>내 둥지 <div class="hpbar" style="width:120px"><div id="myhp" class="hp" style="width:100%"></div></div></div>
+    <div id="pher">🧪 0</div>
+    <div>상대 둥지 <div class="hpbar" style="width:120px"><div id="aihp" class="hp" style="width:100%"></div></div></div>
+  </div>
+  <canvas id="game"></canvas>
+  <div id="controls">
+    <button class="btn" data-card="tank">탱커(6)</button>
+    <button class="btn" data-card="swarm">떼(5)</button>
+    <button class="btn" data-card="ranged">원거리(4)</button>
+    <button class="btn" data-card="burst">스킬(8)</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const pherEl = document.getElementById('pher');
+  const myhpEl = document.getElementById('myhp');
+  const aihpEl = document.getElementById('aihp');
+
+  // --- CONFIG ---
+  const lanes = 3;
+  const world = { w: 540, h: 960 }; // 논리 크기(세로형)
+  const base = { my:{x:60,hp:100}, ai:{x:world.w-60,hp:100} };
+  const regenPerSec = 2.2, pherCap = 10;
+  const speed = { tank: 28, swarm: 42, ranged: 32 };
+  const cost = { tank:6, swarm:5, ranged:4, burst:8 };
+  const dmg = { tank: 7, swarm: 3, ranged: 5 };
+  const range = { melee: 20, ranged: 140 };
+
+  // --- STATE ---
+  let pher = 5, last = performance.now();
+  const myUnits = [], aiUnits = [];
+  const laneY = (i)=> (world.h*(i+1)/(lanes+1));
+  const rnd = (a,b)=> a + Math.random()*(b-a);
+
+  // --- RESIZE ---
+  function fit() {
+    const w = window.innerWidth, h = window.innerHeight;
+    const scale = Math.min(w/world.w, h/world.h);
+    canvas.width = Math.floor(world.w*scale);
+    canvas.height = Math.floor(world.h*scale);
+    ctx.setTransform(scale,0,0,scale,0,0);
+  }
+  window.addEventListener('resize', fit, {passive:true});
+  fit();
+
+  // --- UNIT FACTORY ---
+  function spawn(side, kind, lane) {
+    if (side==='me' && pher < cost[kind]) return false;
+    if (side==='me') pher -= cost[kind];
+    const arr = side==='me'? myUnits: aiUnits;
+    const x = side==='me'? 110 : world.w-110;
+    const dir = side==='me'? 1 : -1;
+
+    const common = { side, kind, lane, x, y: laneY(lane), dir, hp: 1, cd: 0 };
+    if (kind==='tank') arr.push({...common, hp: 50});
+    else if (kind==='swarm') {
+      // 작은 개체 여러 마리
+      for (let i=0;i<6;i++) arr.push({...common, x: x+rnd(-8,8), y: laneY(lane)+rnd(-12,12), hp: 8});
+    } else if (kind==='ranged') arr.push({...common, hp: 20, shoot: 0});
+  }
+
+  // --- INPUT ---
+  document.getElementById('controls').addEventListener('click', (e)=>{
+    const card = e.target?.dataset?.card; if (!card) return;
+    const lane = Math.floor(Math.random()*lanes);
+    if (card==='burst') {
+      if (pher < cost.burst) return;
+      pher -= cost.burst;
+      // 전장 중앙에 페로몬 폭발(넉백+피해)
+      aiUnits.forEach(u => { if (Math.abs(u.x-world.w/2)<180) u.hp -= 15; });
+      return;
+    }
+    spawn('me', card, lane);
+  });
+
+  // --- AI ---
+  let aiTimer = 0;
+  function aiThink(dt) {
+    aiTimer -= dt;
+    if (aiTimer<=0) {
+      aiTimer = rnd(0.9,1.6);
+      // 간단 가중치: 내가 앞서면 탱커/원거리, 밀리면 떼
+      const myFront = Math.max(...myUnits.filter(u=>u.lane===0).map(u=>u.x*1), 0);
+      const aiFront = Math.min(...aiUnits.filter(u=>u.lane===0).map(u=>u.x*1), world.w);
+      const pressure = (myFront - (world.w - aiFront));
+      const pick = pressure>0 ? (Math.random()<0.5?'tank':'ranged') : 'swarm';
+      spawn('ai', pick, Math.floor(Math.random()*lanes));
+    }
+  }
+
+  // --- COMBAT HELPERS ---
+  function stepUnit(u, dt, foes) {
+    const sp = u.kind==='tank'? speed.tank : u.kind==='ranged'? speed.ranged : speed.swarm;
+    // 타겟 탐색(같은 레인 우선)
+    let target = null, dmin = 1e9;
+    for (const f of foes) if (f.lane===u.lane) {
+      const d = Math.abs(f.x - u.x);
+      if (d < dmin) { dmin = d; target = f; }
+    }
+    // 사거리 판정
+    const melee = (u.kind!=='ranged');
+    const canHit = target && dmin <= (melee? range.melee : range.ranged);
+    if (canHit) {
+      u.cd -= dt;
+      if (u.cd<=0) {
+        u.cd = melee? 0.5 : 0.9;
+        target.hp -= dmg[u.kind];
+      }
+      if (melee) return; // 근접이면 제자리에서 때림
+    } else {
+      // 이동
+      u.x += u.dir * sp * dt * 60/100; // 속도 조정
+    }
+    // 둥지 충돌
+    if (u.side==='me' && u.x >= base.ai.x-18) { base.ai.hp -= (u.kind==='tank'?8:4); u.hp = 0; }
+    if (u.side==='ai' && u.x <= base.my.x+18) { base.my.hp -= (u.kind==='tank'?8:4); u.hp = 0; }
+  }
+
+  // --- GAME LOOP ---
+  function loop(now) {
+    const dt = Math.min(0.05, (now-last)/1000); last = now;
+
+    // 자원회복
+    pher = Math.min(pherCap, pher + regenPerSec*dt);
+    pherEl.textContent = `🧪 ${Math.floor(pher)}`;
+
+    // AI
+    aiThink(dt);
+
+    // 업데이트
+    for (const u of myUnits) stepUnit(u, dt, aiUnits);
+    for (const u of aiUnits) stepUnit(u, dt, myUnits);
+
+    // 정리
+    for (let i=myUnits.length-1;i>=0;i--) if (myUnits[i].hp<=0) myUnits.splice(i,1);
+    for (let i=aiUnits.length-1;i>=0;i--) if (aiUnits[i].hp<=0) aiUnits.splice(i,1);
+
+    // 렌더
+    ctx.clearRect(0,0,world.w,world.h);
+    // 배경/레인
+    for (let i=0;i<lanes;i++){
+      const y = laneY(i);
+      ctx.strokeStyle = '#1f2330'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(world.w,y); ctx.stroke();
+    }
+    // 둥지
+    ctx.fillStyle = '#2a2f3c';
+    ctx.beginPath(); ctx.arc(base.my.x, laneY(1), 28, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(base.ai.x, laneY(1), 28, 0, Math.PI*2); ctx.fill();
+
+    // 유닛
+    function drawUnit(u){
+      ctx.save();
+      ctx.translate(u.x, u.y);
+      // 몸통
+      ctx.fillStyle = (u.side==='me')? '#60a5fa' : '#f87171';
+      const r = u.kind==='tank'? 11 : (u.kind==='ranged'?9:7);
+      ctx.beginPath(); ctx.ellipse(0,0,r, r*0.7, 0, 0, Math.PI*2); ctx.fill();
+      // 머리/배
+      ctx.beginPath(); ctx.arc(r*0.9,0,r*0.4,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(-r*0.9,0,r*0.5,0,Math.PI*2); ctx.fill();
+      // HP 바
+      const hpw = Math.max(0, Math.min(1, u.hp/(u.kind==='tank'?50:(u.kind==='ranged'?20:8))))*18;
+      ctx.fillStyle = '#10b981'; ctx.fillRect(-9,-14,hpw,3);
+      ctx.restore();
+    }
+    myUnits.forEach(drawUnit); aiUnits.forEach(drawUnit);
+
+    // HP UI
+    myhpEl.style.width = Math.max(0,base.my.hp)/100*100 + '%';
+    aihpEl.style.width = Math.max(0,base.ai.hp)/100*100 + '%';
+
+    // 종료 체크
+    if (base.my.hp<=0 || base.ai.hp<=0) {
+      ctx.fillStyle = '#fff'; ctx.font = 'bold 36px system-ui';
+      ctx.textAlign='center';
+      ctx.fillText(base.my.hp<=0? '패배 😵' : '승리 🏆', world.w/2, world.h/2);
+      return; // 스톱
+    }
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
